@@ -2,6 +2,7 @@ package io.github.tajudeenj.streaming;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.ZoneId;
 import java.util.Locale;
 
 /** Immutable runtime configuration, read once from environment variables. */
@@ -24,7 +25,13 @@ public record Config(
         Duration heartbeatInterval,
         String allowedOrigin,
         Path staticDir,
-        boolean trustProxy) {
+        boolean trustProxy,
+        Path policyDir,
+        int retrievalTopK,
+        double retrievalMinScore,
+        double retrievalMinCoverage,
+        boolean trustIdentityHeader,
+        ZoneId zone) {
 
     public static Config fromEnv() {
         Config c = new Config(
@@ -46,7 +53,13 @@ public record Config(
                 Duration.ofSeconds(intEnv("SSE_HEARTBEAT_SECONDS", 15, 1, 300)),
                 env("ALLOWED_ORIGIN", ""),
                 Path.of(env("STATIC_DIR", "../web/dist")).toAbsolutePath().normalize(),
-                Boolean.parseBoolean(env("TRUST_PROXY", "false")));
+                Boolean.parseBoolean(env("TRUST_PROXY", "false")),
+                Path.of(env("POLICY_DIR", "../policies")).toAbsolutePath().normalize(),
+                intEnv("RETRIEVAL_TOP_K", 4, 1, 20),
+                intEnv("RETRIEVAL_MIN_SCORE_X100", 150, 0, 10_000) / 100.0,
+                intEnv("RETRIEVAL_MIN_COVERAGE_PCT", 50, 0, 100) / 100.0,
+                Boolean.parseBoolean(env("TRUST_IDENTITY_HEADER", "false")),
+                zone(env("TIME_ZONE", "Asia/Dubai")));
         c.validate();
         return c;
     }
@@ -66,7 +79,16 @@ public record Config(
     public String toString() {
         return "Config[port=" + port + ", provider=" + provider + ", model=" + llmModel
                 + ", maxConcurrentStreams=" + maxConcurrentStreams + ", rateLimitPerMinute=" + rateLimitPerMinute
-                + ", staticDir=" + staticDir + ", trustProxy=" + trustProxy + "]";
+                + ", staticDir=" + staticDir + ", trustProxy=" + trustProxy + ", policyDir=" + policyDir
+                + ", retrievalTopK=" + retrievalTopK + ", trustIdentityHeader=" + trustIdentityHeader + ", zone=" + zone + "]";
+    }
+
+    private static ZoneId zone(String id) {
+        try {
+            return ZoneId.of(id);
+        } catch (java.time.DateTimeException e) {
+            throw new IllegalStateException("TIME_ZONE is not a valid zone id", e);
+        }
     }
 
     private static String env(String name, String def) {

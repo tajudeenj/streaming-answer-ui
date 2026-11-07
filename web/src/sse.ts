@@ -37,10 +37,35 @@ export interface HistoryTurn {
   content: string;
 }
 
+export interface SourceRef {
+  ref: string;
+  docId: string;
+  title: string;
+  version: string;
+  effectiveFrom: string;
+  section: string;
+  hash: string;
+}
+
+export interface StreamMeta {
+  requestId: string;
+  model: string;
+  redactions: number;
+  audience: string;
+  grounded: boolean;
+  sources: SourceRef[];
+}
+
+export interface StreamDone {
+  fragments: number;
+  elapsedMs: number;
+  abstained: boolean;
+}
+
 export interface StreamCallbacks {
-  onMeta(meta: { requestId: string; model: string; redactions: number }): void;
+  onMeta(meta: StreamMeta): void;
   onDelta(text: string): void;
-  onDone(summary: { fragments: number; elapsedMs: number }): void;
+  onDone(summary: StreamDone): void;
 }
 
 export class AnswerError extends Error {
@@ -89,14 +114,17 @@ export async function streamAnswer(
     const payload = JSON.parse(data) as Record<string, unknown>;
     switch (event) {
       case "meta":
-        cb.onMeta(payload as unknown as { requestId: string; model: string; redactions: number });
+        cb.onMeta({
+          ...(payload as unknown as StreamMeta),
+          sources: Array.isArray(payload.sources) ? (payload.sources as SourceRef[]) : [],
+        });
         break;
       case "delta":
         if (typeof payload.t === "string") cb.onDelta(payload.t);
         break;
       case "done":
         finished = true;
-        cb.onDone(payload as unknown as { fragments: number; elapsedMs: number });
+        cb.onDone({ ...(payload as unknown as StreamDone), abstained: payload.abstained === true });
         break;
       case "error":
         finished = true;

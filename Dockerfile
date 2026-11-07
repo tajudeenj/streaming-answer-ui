@@ -20,7 +20,8 @@ RUN addgroup -S app && adduser -S -G app app
 WORKDIR /app
 COPY --from=server /server/target/streaming-answer-ui.jar app.jar
 COPY --from=web /web/dist ./web
-ENV STATIC_DIR=/app/web PORT=8080
+COPY policies ./policies
+ENV STATIC_DIR=/app/web POLICY_DIR=/app/policies PORT=8080
 USER app
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:8080/api/health || exit 1

@@ -42,7 +42,7 @@ public final class OpenAiCompatibleProvider implements LlmProvider {
     public String model() { return cfg.llmModel(); }
 
     @Override
-    public void stream(List<ChatMessage> messages, TokenSink sink) throws IOException, UpstreamException, InterruptedException {
+    public void stream(List<ChatMessage> messages, List<Bm25Index.Hit> sources, TokenSink sink) throws IOException, UpstreamException, InterruptedException {
         List<Map<String, Object>> msgs = new ArrayList<>(messages.size());
         for (ChatMessage m : messages) msgs.add(Map.of("role", m.role(), "content", m.content()));
         String body = Json.obj(

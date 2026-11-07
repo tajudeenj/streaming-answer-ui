@@ -12,10 +12,13 @@ security and risk functions will ask for before anything goes live.
 ```
 Browser (React + TS)                     Gateway (JDK 21, zero runtime deps)                 Model provider
 ──────────────────────                   ───────────────────────────────────────              ───────────────
-POST /api/answer/stream  ──JSON──►  rate limit ► size/UTF-8/schema checks ► input guard   
-                                     ► PII masking ► concurrency slot                    ──►  OpenAI-compatible
-fetch + ReadableStream   ◄──SSE───   meta ► delta* ► done | error   (+ keep-alive)       ◄──  chat/completions (stream)
-rAF-batched rendering                hard deadline watchdog, cancel on client disconnect
+POST /api/answer/stream  ──JSON──►  rate limit ► size/UTF-8/schema checks ► input guard
+                                     ► PII masking ► policy retrieval (entitled, effective,
+                                       relevant) ► abstain if no source ► concurrency slot ──►  OpenAI-compatible
+fetch + ReadableStream   ◄──SSE───   meta(+sources) ► delta* ► done | error (+ keep-alive) ◄──  chat/completions (stream)
+rAF-batched rendering, citations     hard deadline watchdog, cancel on client disconnect
+
+Policy library (Markdown + front matter) ─► load-time quarantine of poisoned chunks ─► BM25 index
 ```
 
 ### Gateway controls
@@ -26,6 +29,8 @@ rAF-batched rendering                hard deadline watchdog, cancel on client di
 | Scale | One virtual thread per request; shared HTTP/2 client with connection pooling; semaphore caps concurrent streams and sheds excess with `503 Retry-After`. |
 | Abuse | Per-client token bucket (bounded LRU key space) with `429 Retry-After`; body size cap; strict UTF-8 and JSON (depth-limited) parsing. |
 | Data leakage | Emirates ID, IBAN, Luhn-valid card numbers, email and UAE mobile numbers are masked **before** text leaves the bank boundary. Count is reported to the UI, values never are. |
+| Grounding | Answers come only from the policy library and cite every statement. Retrieval filters by audience and effective date **before** ranking, applies a score and query-coverage gate, and abstains without a model call when no source qualifies. See [Step 1 lesson](docs/lessons/step-1-grounding.md). |
+| Poisoned documents | Policy chunks with hidden markup, invisible characters or text addressed to the model are quarantined at load time and counted in `/api/health`. Source text is fenced and labelled as data in the prompt. |
 | Prompt injection | Control, zero-width and bidi characters stripped; NFKC normalisation; instruction-override phrasing rejected with `422`; hardened system prompt. Treated as a pre-filter, not a guarantee. |
 | Resilience | Hard total deadline (header timeout alone does not bound a stream); upstream closed as soon as the browser disconnects; SSE keep-alive for proxies; graceful drain on shutdown. |
 | Output safety | All JSON output escapes `< > &` and line separators; UI renders text only (no HTML injection path). |
@@ -69,6 +74,15 @@ java -jar target/streaming-answer-ui.jar
 
 All settings are listed in [`.env.example`](.env.example) and validated at startup.
 
+### Policy library
+
+Documents live in [`policies/`](policies/) as Markdown with front matter (`id`, `title`, `version`,
+`effective_from`, optional `effective_to`, `audience`). The sample library is illustrative and describes a
+fictional bank. Point `POLICY_DIR` at your own library; files are validated and screened at startup.
+
+Audience defaults to `customer`. To serve staff content, place the gateway behind an identity-aware proxy that
+sets `X-User-Audience` (and strips any client-supplied value), then set `TRUST_IDENTITY_HEADER=true`.
+
 ### Docker
 
 ```bash
@@ -88,9 +102,12 @@ docker run --rm -p 8080:8080 -e LLM_PROVIDER=mock streaming-answer-ui
 Response is `text/event-stream`:
 
 ```
-event: meta   data: {"requestId":"…","model":"…","redactions":1}
-event: delta  data: {"t":"In a Murabaha,"}
-event: done   data: {"fragments":112,"elapsedMs":3480}
+event: meta   data: {"requestId":"…","model":"…","redactions":1,"audience":"customer","grounded":true,
+                     "sources":[{"ref":"S1","docId":"murabaha-terms","title":"Murabaha Finance Terms","version":"2.0",
+                                 "effectiveFrom":"2026-01-01","section":"Early settlement","hash":"3f2a9c…"}]}
+event: delta  data: {"t":"Customers may settle early at any time."}
+event: delta  data: {"t":" [S1]"}
+event: done   data: {"fragments":42,"abstained":false,"elapsedMs":1480}
 event: error  data: {"message":"The answer service is busy. Try again in a few seconds."}
 ```
 
@@ -99,8 +116,9 @@ Errors before streaming starts are JSON: `400 413 415 422 429 503`, each with `e
 ## Tests
 
 ```bash
-cd server && mvn verify      # JSON, masking, injection guard, rate limiter, provider parsing
-cd web && npm test           # SSE parser: split frames, CRLF, heartbeats, multi-line data
+cd server && mvn verify      # JSON, masking, injection guards, rate limiter, provider parsing,
+                             # policy loading and quarantine, entitlement / versioning / relevance retrieval
+cd web && npm test           # SSE parser, citation rendering
 ```
 
 ## Production notes
@@ -109,6 +127,14 @@ cd web && npm test           # SSE parser: split frames, CRLF, heartbeats, multi
 - Set `TRUST_PROXY=true` only behind a reverse proxy you control; the right-most `X-Forwarded-For` entry is used.
 - Fonts load from Google Fonts with system fallbacks; self-host them for air-gapped deployments and tighten the CSP.
 - Masking is pattern-based. Pair it with a DLP service for free-text names and addresses.
+- The policy index is built at startup. Restart (or roll the deployment) to publish new document versions;
+  effective dates mean you can publish ahead of a change and it switches on automatically.
+
+## Build log
+
+| Step | Topic | Lesson |
+|---|---|---|
+| 1 | Grounding with entitlements, versioning and poisoned-document defense | [docs/lessons/step-1-grounding.md](docs/lessons/step-1-grounding.md) |
 
 ## License
 

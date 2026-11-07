@@ -12,6 +12,7 @@ final class Metrics {
     final AtomicLong rejectedRateLimit = new AtomicLong();
     final AtomicLong rejectedCapacity = new AtomicLong();
     final AtomicLong rejectedInjection = new AtomicLong();
+    final AtomicLong abstained = new AtomicLong();
 
     void record(String outcome) {
         switch (outcome) {

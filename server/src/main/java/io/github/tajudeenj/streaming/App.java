@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
+import java.time.Clock;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -43,8 +44,12 @@ public final class App {
                 ? new OpenAiCompatibleProvider(cfg, http, scheduler)
                 : new MockProvider();
 
+        PolicyLoader.Result library = PolicyLoader.load(cfg.policyDir());
+        PolicyRetriever retriever = new PolicyRetriever(new Bm25Index(library.chunks()), Clock.system(cfg.zone()),
+                cfg.retrievalTopK(), cfg.retrievalMinScore(), cfg.retrievalMinCoverage());
+
         Metrics metrics = new Metrics();
-        StreamHandler stream = new StreamHandler(cfg, provider, new RateLimiter(cfg.rateLimitPerMinute()), scheduler, metrics);
+        StreamHandler stream = new StreamHandler(cfg, provider, retriever, new RateLimiter(cfg.rateLimitPerMinute()), scheduler, metrics);
         Filter common = commonFilter(cfg);
 
         HttpServer server = HttpServer.create(new InetSocketAddress(cfg.port()), cfg.backlog());
@@ -61,7 +66,12 @@ public final class App {
                 "serverErrors", metrics.serverErrors.get(),
                 "rejectedRateLimit", metrics.rejectedRateLimit.get(),
                 "rejectedCapacity", metrics.rejectedCapacity.get(),
-                "rejectedInjection", metrics.rejectedInjection.get()))).getFilters().add(common);
+                "rejectedInjection", metrics.rejectedInjection.get(),
+                "abstained", metrics.abstained.get(),
+                "policyDocuments", library.documents(),
+                "policyChunks", library.chunks().size(),
+                "quarantinedChunks", library.quarantined(),
+                "rejectedPolicyFiles", library.rejectedFiles()))).getFilters().add(common);
         server.createContext("/", new StaticHandler(cfg.staticDir())).getFilters().add(common);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

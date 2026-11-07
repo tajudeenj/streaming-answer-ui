@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AnswerError, streamAnswer, type HistoryTurn } from "./sse";
+import { AnswerError, streamAnswer, type HistoryTurn, type SourceRef } from "./sse";
 
 export type TurnStatus = "waiting" | "streaming" | "done" | "stopped" | "error";
 
@@ -11,6 +11,8 @@ export interface Turn {
   error?: string;
   requestId?: string;
   redactions: number;
+  sources: SourceRef[];
+  abstained: boolean;
   firstTokenMs?: number;
   totalMs?: number;
 }
@@ -52,7 +54,7 @@ export function useAnswerStream() {
     controller.current?.abort();
 
     const history: HistoryTurn[] = turnsRef.current
-      .filter((t) => t.status === "done")
+      .filter((t) => t.status === "done" && !t.abstained)
       .slice(-MAX_HISTORY_TURNS)
       .flatMap((t) => [
         { role: "user" as const, content: t.question },
@@ -67,11 +69,11 @@ export function useAnswerStream() {
     const started = performance.now();
     let firstSeen = false;
 
-    setTurns((all) => [...all, { id, question: q, answer: "", status: "waiting", redactions: 0 }]);
+    setTurns((all) => [...all, { id, question: q, answer: "", status: "waiting", redactions: 0, sources: [], abstained: false }]);
 
     try {
       await streamAnswer(q, history, {
-        onMeta: (m) => patch(id, (t) => ({ ...t, requestId: m.requestId, redactions: m.redactions })),
+        onMeta: (m) => patch(id, (t) => ({ ...t, requestId: m.requestId, redactions: m.redactions, sources: m.sources })),
         onDelta: (text) => {
           if (!firstSeen) {
             firstSeen = true;
@@ -81,11 +83,11 @@ export function useAnswerStream() {
           pending.current += text;
           if (frame.current === null) frame.current = requestAnimationFrame(() => flush(id));
         },
-        onDone: () => {
+        onDone: (d) => {
           cancelFrame();
           flush(id);
           const ms = Math.round(performance.now() - started);
-          patch(id, (t) => ({ ...t, status: "done", totalMs: ms }));
+          patch(id, (t) => ({ ...t, status: "done", totalMs: ms, abstained: d.abstained }));
         },
       }, ac.signal);
     } catch (e) {
