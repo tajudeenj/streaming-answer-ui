@@ -1,0 +1,8 @@
+server/target/
+web/node_modules/
+web/dist/
+.env
+*.log
+.DS_Store
+.idea/
+.vscode/

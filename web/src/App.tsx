@@ -1,0 +1,150 @@
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useAnswerStream, type Turn } from "./useAnswerStream";
+
+const MAX_CHARS = 4000;
+
+const STARTERS = [
+  "How is Murabaha pricing different from interest?",
+  "Who pays if an Ijarah asset is damaged?",
+  "Explain Takaful to a customer in two sentences.",
+];
+
+export function App() {
+  const { turns, ask, stop, busy } = useAnswerStream();
+  const [draft, setDraft] = useState("");
+  const endRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const last = turns[turns.length - 1];
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  }, [turns.length, last?.answer.length]);
+
+  const submit = (e?: FormEvent) => {
+    e?.preventDefault();
+    if (busy || !draft.trim()) return;
+    void ask(draft);
+    setDraft("");
+  };
+
+  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) submit();
+  };
+
+  return (
+    <div className="shell">
+      <header className="masthead">
+        <h1>Policy desk</h1>
+        <p>Plain-English answers on Islamic finance products, written as you read.</p>
+      </header>
+
+      <main className="thread" aria-label="Conversation">
+        {turns.length === 0 ? (
+          <section className="empty">
+            <h2>Ask about a product</h2>
+            <p>Account numbers, Emirates IDs, cards, emails and phone numbers are masked before your question leaves this server.</p>
+            <div className="starters">
+              {STARTERS.map((s) => (
+                <button key={s} type="button" className="starter" onClick={() => void ask(s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : (
+          turns.map((t) => <TurnView key={t.id} turn={t} onRetry={() => void ask(t.question)} canRetry={!busy} />)
+        )}
+        <div ref={endRef} />
+      </main>
+
+      <form className="composer" onSubmit={submit}>
+        <label htmlFor="question" className="visually-hidden">Your question</label>
+        <textarea
+          id="question"
+          ref={inputRef}
+          value={draft}
+          maxLength={MAX_CHARS}
+          rows={2}
+          placeholder="Ask about Murabaha, Ijarah, Takaful…"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={onKey}
+        />
+        {busy ? (
+          <button type="button" className="action stop" onClick={stop}>Stop</button>
+        ) : (
+          <button type="submit" className="action" disabled={!draft.trim()}>Ask</button>
+        )}
+      </form>
+    </div>
+  );
+}
+
+function TurnView({ turn, onRetry, canRetry }: { turn: Turn; onRetry: () => void; canRetry: boolean }) {
+  const live = turn.status === "waiting" || turn.status === "streaming";
+  const paragraphs = turn.answer.split(/\n{2,}/);
+
+  return (
+    <article className="turn" aria-busy={live}>
+      <h3 className="question">{turn.question}</h3>
+
+      <div className="answer" aria-live="polite">
+        {turn.status === "waiting" && <p className="pending">Preparing an answer</p>}
+        {turn.answer &&
+          paragraphs.map((p, i) => (
+            <p key={i}>
+              {p}
+              {live && i === paragraphs.length - 1 && <span className="caret" aria-hidden="true" />}
+            </p>
+          ))}
+      </div>
+
+      {turn.status === "error" && (
+        <div className="notice" role="alert">
+          <p>{turn.error}</p>
+          {turn.requestId && <p className="ref">Reference {turn.requestId}</p>}
+          <button type="button" className="link" onClick={onRetry} disabled={!canRetry}>Ask again</button>
+        </div>
+      )}
+      {turn.status === "stopped" && (
+        <div className="notice quiet">
+          <p>You stopped this answer.</p>
+          <button type="button" className="link" onClick={onRetry} disabled={!canRetry}>Ask again</button>
+        </div>
+      )}
+
+      <Telemetry turn={turn} />
+    </article>
+  );
+}
+
+function Telemetry({ turn }: { turn: Turn }) {
+  const words = turn.answer.trim() ? turn.answer.trim().split(/\s+/).length : 0;
+  const streamMs = turn.totalMs !== undefined && turn.firstTokenMs !== undefined ? turn.totalMs - turn.firstTokenMs : undefined;
+  const rate = streamMs && streamMs > 0 && words > 1 ? Math.round((words / streamMs) * 1000) : undefined;
+  const firstShare =
+    turn.firstTokenMs !== undefined && turn.totalMs ? Math.min(100, (turn.firstTokenMs / turn.totalMs) * 100) : undefined;
+
+  if (turn.firstTokenMs === undefined && turn.redactions === 0) return null;
+
+  return (
+    <footer className="telemetry">
+      {turn.totalMs !== undefined && firstShare !== undefined && (
+        <div className="rail" role="img" aria-label={`First words after ${turn.firstTokenMs} ms of ${turn.totalMs} ms total`}>
+          <span className="rail-wait" style={{ width: `${firstShare}%` }} />
+          <span className="rail-stream" />
+        </div>
+      )}
+      <dl>
+        {turn.firstTokenMs !== undefined && (
+          <div><dt>First words</dt><dd>{turn.firstTokenMs} ms</dd></div>
+        )}
+        {rate !== undefined && (
+          <div><dt>Pace</dt><dd>{rate} words/s</dd></div>
+        )}
+        {turn.redactions > 0 && (
+          <div><dt>Masked</dt><dd>{turn.redactions} {turn.redactions === 1 ? "detail" : "details"}</dd></div>
+        )}
+      </dl>
+    </footer>
+  );
+}
