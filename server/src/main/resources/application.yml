@@ -31,7 +31,7 @@ spring:
       embedding: transformers         # local ONNX embeddings
     openai:
       api-key: ${LLM_API_KEY:not-set}
-      base-url: ${LLM_BASE_URL:https://api.openai.com}
+      base-url: ${LLM_BASE_URL:https://api.openai.com/v1}
       chat:
         options:
           model: ${LLM_MODEL:gpt-4o-mini}
