@@ -1,0 +1,38 @@
+# Local stack: PostgreSQL with pgvector plus the gateway. Credentials here are for local use only.
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: policydesk
+      POSTGRES_USER: policydesk
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-policydesk-local}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U policydesk -d policydesk"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/policydesk
+      DB_USER: policydesk
+      DB_PASSWORD: ${DB_PASSWORD:-policydesk-local}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - models:/app/.cache
+
+volumes:
+  pgdata:
+  models:

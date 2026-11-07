@@ -1,7 +1,9 @@
 package io.github.tajudeenj.streaming;
 
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpHandler;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -27,8 +29,9 @@ import java.util.logging.Logger;
  * currently effective policy passages, then relays a grounded, cited answer as Server-Sent Events
  * (meta, delta*, then done or error). With no qualifying source it abstains without calling the model.
  */
-final class StreamHandler implements HttpHandler {
-    private static final Logger LOG = Logger.getLogger(StreamHandler.class.getName());
+@RestController
+public class AnswerController {
+    private static final Logger LOG = Logger.getLogger(AnswerController.class.getName());
     private static final Set<String> AUDIENCES = Set.of("customer", "staff");
     static final String AUDIENCE_HEADER = "X-User-Audience";
 
@@ -47,14 +50,14 @@ final class StreamHandler implements HttpHandler {
 
     private final Config cfg;
     private final LlmProvider provider;
-    private final PolicyRetriever retriever;
+    private final HybridRetriever retriever;
     private final RateLimiter limiter;
     private final Semaphore slots;
     private final ScheduledExecutorService scheduler;
     private final Metrics metrics;
 
-    StreamHandler(Config cfg, LlmProvider provider, PolicyRetriever retriever, RateLimiter limiter,
-                  ScheduledExecutorService scheduler, Metrics metrics) {
+    public AnswerController(Config cfg, LlmProvider provider, HybridRetriever retriever, RateLimiter limiter,
+                            ScheduledExecutorService scheduler, Metrics metrics) {
         this.cfg = cfg;
         this.provider = provider;
         this.retriever = retriever;
@@ -66,37 +69,32 @@ final class StreamHandler implements HttpHandler {
 
     int activeStreams() { return cfg.maxConcurrentStreams() - slots.availablePermits(); }
 
-    @Override
-    public void handle(HttpExchange ex) throws IOException {
-        String rid = ex.getResponseHeaders().getFirst(Http.REQUEST_ID);
-        if (!"POST".equals(ex.getRequestMethod())) {
-            ex.getResponseHeaders().set("Allow", "POST");
-            Http.error(ex, 405, "method_not_allowed", "Use POST.");
-            return;
-        }
-        String ct = ex.getRequestHeaders().getFirst("Content-Type");
+    @PostMapping("/api/answer/stream")
+    public void handle(HttpServletRequest req, HttpServletResponse res) throws IOException {
+        String rid = String.valueOf(req.getAttribute(EdgeFilter.REQUEST_ID_ATTR));
+        String ct = req.getContentType();
         if (ct == null || !ct.toLowerCase(Locale.ROOT).startsWith("application/json")) {
-            Http.error(ex, 415, "unsupported_media_type", "Send the question as application/json.");
+            HttpIo.error(res, rid, 415, "unsupported_media_type", "Send the question as application/json.");
             return;
         }
-        String client = Http.clientKey(ex, cfg.trustProxy());
+        String client = HttpIo.clientKey(req, cfg.trustProxy());
         if (!limiter.tryAcquire(client)) {
             metrics.rejectedRateLimit.incrementAndGet();
-            ex.getResponseHeaders().set("Retry-After", String.valueOf(limiter.retryAfterSeconds(client)));
-            Http.error(ex, 429, "rate_limited", "Too many questions in a short time. Wait a moment and ask again.");
+            res.setHeader("Retry-After", String.valueOf(limiter.retryAfterSeconds(client)));
+            HttpIo.error(res, rid, 429, "rate_limited", "Too many questions in a short time. Wait a moment and ask again.");
             return;
         }
         String audience;
         try {
-            audience = resolveAudience(ex);
+            audience = resolveAudience(req);
         } catch (IllegalArgumentException e) {
-            Http.error(ex, 400, "invalid_audience", e.getMessage());
+            HttpIo.error(res, rid, 400, "invalid_audience", e.getMessage());
             return;
         }
 
-        byte[] raw = Http.readBody(ex, cfg.maxBodyBytes());
+        byte[] raw = HttpIo.readBody(req, cfg.maxBodyBytes());
         if (raw == null) {
-            Http.error(ex, 413, "too_large", "The request is too large.");
+            HttpIo.error(res, rid, 413, "too_large", "The request is too large.");
             return;
         }
 
@@ -104,30 +102,31 @@ final class StreamHandler implements HttpHandler {
         try {
             p = parse(raw);
         } catch (IllegalArgumentException e) {
-            Http.error(ex, 400, "invalid_request", e.getMessage());
+            HttpIo.error(res, rid, 400, "invalid_request", e.getMessage());
             return;
         } catch (InjectionException e) {
             metrics.rejectedInjection.incrementAndGet();
             LOG.info(() -> "rid=" + rid + " rejected: instruction-override pattern");
-            Http.error(ex, 422, "unsafe_input", "That question looks like an attempt to change the assistant's rules. Rephrase it as a product question.");
+            HttpIo.error(res, rid, 422, "unsafe_input", "That question looks like an attempt to change the assistant's rules. Rephrase it as a product question.");
             return;
         }
 
         // Retrieval runs on masked text only, so personal data never reaches the index or the logs.
-        List<Bm25Index.Hit> sources = retriever.retrieve(p.retrievalQuery(), audience);
+        List<Source> sources = retriever.retrieve(p.retrievalQuery(), audience);
 
         if (!slots.tryAcquire()) {
             metrics.rejectedCapacity.incrementAndGet();
-            ex.getResponseHeaders().set("Retry-After", "5");
-            Http.error(ex, 503, "busy", "The assistant is at capacity. Try again in a few seconds.");
+            res.setHeader("Retry-After", "5");
+            HttpIo.error(res, rid, 503, "busy", "The assistant is at capacity. Try again in a few seconds.");
             return;
         }
 
         long started = System.nanoTime();
         AtomicInteger fragments = new AtomicInteger();
-        ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
-        ex.getResponseHeaders().set("Cache-Control", "no-cache, no-transform");
-        ex.getResponseHeaders().set("X-Accel-Buffering", "no");
+        res.setStatus(200);
+        res.setContentType("text/event-stream;charset=UTF-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("X-Accel-Buffering", "no");
         metrics.streamsStarted.incrementAndGet();
 
         SseWriter sse = null;
@@ -135,8 +134,7 @@ final class StreamHandler implements HttpHandler {
         String outcome = "ok";
         boolean abstained = sources.isEmpty();
         try {
-            ex.sendResponseHeaders(200, 0); // chunked
-            SseWriter writer = new SseWriter(ex.getResponseBody());
+            SseWriter writer = new SseWriter(res.getOutputStream());
             sse = writer;
             writer.event("meta", Json.obj(
                     "requestId", rid,
@@ -193,7 +191,6 @@ final class StreamHandler implements HttpHandler {
             String srcLog = sources.stream().map(h -> h.chunk().docId() + "@" + h.chunk().version()).distinct().toList().toString();
             LOG.info(() -> "rid=" + rid + " outcome=" + o + " audience=" + audience + " abstained=" + abstained
                     + " sources=" + srcLog + " fragments=" + fragments.get() + " ms=" + ms);
-            ex.close();
         }
     }
 
@@ -202,16 +199,16 @@ final class StreamHandler implements HttpHandler {
      * identity-aware gateway is trusted to set it (and strip any client-supplied value); otherwise every
      * caller is treated as a customer, so a browser can never self-elevate to staff content.
      */
-    private String resolveAudience(HttpExchange ex) {
+    private String resolveAudience(HttpServletRequest req) {
         if (!cfg.trustIdentityHeader()) return "customer";
-        String h = ex.getRequestHeaders().getFirst(AUDIENCE_HEADER);
+        String h = req.getHeader(AUDIENCE_HEADER);
         if (h == null || h.isBlank()) return "customer";
         String a = h.trim().toLowerCase(Locale.ROOT);
         if (!AUDIENCES.contains(a)) throw new IllegalArgumentException("Unknown audience.");
         return a;
     }
 
-    static List<ChatMessage> buildMessages(Parsed p, List<Bm25Index.Hit> sources) {
+    static List<ChatMessage> buildMessages(Parsed p, List<Source> sources) {
         List<ChatMessage> out = new ArrayList<>(p.history().size() + 2);
         out.add(new ChatMessage("system", SYSTEM_PROMPT));
         out.addAll(p.history());
@@ -232,7 +229,7 @@ final class StreamHandler implements HttpHandler {
         return s.replace('<', '\u2039').replace('>', '\u203A').replace('"', '\u201D');
     }
 
-    private static List<Map<String, Object>> describe(List<Bm25Index.Hit> sources) {
+    private static List<Map<String, Object>> describe(List<Source> sources) {
         List<Map<String, Object>> out = new ArrayList<>(sources.size());
         for (int i = 0; i < sources.size(); i++) {
             PolicyChunk c = sources.get(i).chunk();
@@ -244,6 +241,7 @@ final class StreamHandler implements HttpHandler {
             m.put("effectiveFrom", c.effectiveFrom().toString());
             m.put("section", c.section());
             m.put("hash", c.docSha256().substring(0, 12));
+            m.put("relevance", Math.round(sources.get(i).relevance() * 100) / 100.0);
             out.add(m);
         }
         return out;

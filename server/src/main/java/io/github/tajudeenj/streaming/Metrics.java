@@ -3,7 +3,7 @@ package io.github.tajudeenj.streaming;
 import java.util.concurrent.atomic.AtomicLong;
 
 /** Lock-free counters exposed at /api/health for dashboards and alerting. */
-final class Metrics {
+public final class Metrics {
     final AtomicLong streamsStarted = new AtomicLong();
     final AtomicLong completed = new AtomicLong();
     final AtomicLong cancelled = new AtomicLong();
@@ -13,6 +13,8 @@ final class Metrics {
     final AtomicLong rejectedCapacity = new AtomicLong();
     final AtomicLong rejectedInjection = new AtomicLong();
     final AtomicLong abstained = new AtomicLong();
+    final AtomicLong rerankerFallbacks = new AtomicLong();
+    final AtomicLong vectorFallbacks = new AtomicLong();
 
     void record(String outcome) {
         switch (outcome) {

@@ -11,6 +11,6 @@ import java.util.List;
 public interface LlmProvider {
     String model();
 
-    void stream(List<ChatMessage> messages, List<Bm25Index.Hit> sources, TokenSink sink)
+    void stream(List<ChatMessage> messages, List<Source> sources, TokenSink sink)
             throws IOException, UpstreamException, InterruptedException;
 }

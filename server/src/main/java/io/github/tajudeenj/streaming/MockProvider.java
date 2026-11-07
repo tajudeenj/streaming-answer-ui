@@ -17,7 +17,7 @@ public final class MockProvider implements LlmProvider {
     public String model() { return "mock"; }
 
     @Override
-    public void stream(List<ChatMessage> messages, List<Bm25Index.Hit> sources, TokenSink sink)
+    public void stream(List<ChatMessage> messages, List<Source> sources, TokenSink sink)
             throws java.io.IOException, InterruptedException {
         List<String> paragraphs = new ArrayList<>();
         for (int i = 0; i < sources.size() && paragraphs.size() < 3; i++) {

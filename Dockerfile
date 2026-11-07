@@ -12,17 +12,18 @@ WORKDIR /server
 COPY server/pom.xml ./
 RUN mvn -q -B dependency:go-offline
 COPY server/src ./src
-RUN mvn -q -B package
+RUN mvn -q -B package -DskipTests
 
-# ---- runtime: JRE only, non-root, read-only friendly
-FROM eclipse-temurin:21-jre-alpine
-RUN addgroup -S app && adduser -S -G app app
+# ---- runtime: glibc-based JRE (ONNX Runtime and the tokenizer ship glibc native libraries), non-root
+FROM eclipse-temurin:21-jre-noble
+RUN groupadd --system app && useradd --system --gid app --home-dir /app app
 WORKDIR /app
 COPY --from=server /server/target/streaming-answer-ui.jar app.jar
 COPY --from=web /web/dist ./web
 COPY policies ./policies
-ENV STATIC_DIR=/app/web POLICY_DIR=/app/policies PORT=8080
+RUN mkdir -p /app/.cache && chown -R app:app /app/.cache
+ENV STATIC_DIR=/app/web POLICY_DIR=/app/policies MODEL_CACHE_DIR=/app/.cache PORT=8080
 USER app
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:8080/api/health || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=120s CMD wget -qO- http://127.0.0.1:8080/actuator/health/readiness || exit 1
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-XX:+ExitOnOutOfMemoryError", "-jar", "app.jar"]

@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, "step-*"]
   pull_request:
 
 permissions:
@@ -21,6 +21,11 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - name: Cache embedding and reranker models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/policy-desk
+          key: models-minilm-msmarco-v1
       - run: mvn -B verify
 
   web:

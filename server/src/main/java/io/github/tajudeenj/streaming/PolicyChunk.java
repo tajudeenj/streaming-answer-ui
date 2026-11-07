@@ -26,4 +26,15 @@ public record PolicyChunk(
     public boolean visibleTo(String audience) {
         return audiences.contains(audience);
     }
+
+    /** Stable identity for this exact passage text in this exact document version. */
+    public String key() {
+        try {
+            byte[] d = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest((docId + "@" + version + "#" + section + "#" + text).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return docId + "@" + version + "#" + java.util.HexFormat.of().formatHex(d, 0, 12);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
 }
