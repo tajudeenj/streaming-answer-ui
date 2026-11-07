@@ -10,26 +10,30 @@ security and risk functions will ask for before anything goes live.
 ## Architecture
 
 ```
-Browser (React + TS)                     Gateway (JDK 21, zero runtime deps)                 Model provider
-──────────────────────                   ───────────────────────────────────────              ───────────────
-POST /api/answer/stream  ──JSON──►  rate limit ► size/UTF-8/schema checks ► input guard
-                                     ► PII masking ► policy retrieval (entitled, effective,
-                                       relevant) ► abstain if no source ► concurrency slot ──►  OpenAI-compatible
-fetch + ReadableStream   ◄──SSE───   meta(+sources) ► delta* ► done | error (+ keep-alive) ◄──  chat/completions (stream)
-rAF-batched rendering, citations     hard deadline watchdog, cancel on client disconnect
+Browser (React + TS)            Gateway (Spring Boot 4.1, Spring AI 2.0, virtual threads)            Model provider
+────────────────────            ─────────────────────────────────────────────────────────            ──────────────
+POST /api/answer/stream ─JSON─► rate limit ► size/UTF-8/schema ► input guard ► PII masking
+                                ► entitlement + effective-date filter
+                                ► hybrid retrieval: BM25 + pgvector (local embeddings) ► RRF fusion
+                                ► cross-encoder rerank + relevance gate ► abstain if no source
+                                ► concurrency slot ──────────────────────────────────────────────►  Spring AI ChatModel
+fetch + ReadableStream ◄─SSE──  meta(+sources) ► delta* ► done | error (+ keep-alive)         ◄──  (OpenAI-compatible)
+rAF rendering, citations        hard deadline, cancel upstream on client disconnect
 
-Policy library (Markdown + front matter) ─► load-time quarantine of poisoned chunks ─► BM25 index
+Policy library (Markdown + front matter) ─► load-time quarantine ─► BM25 index (memory)
+                                                                  └► incremental embed ─► pgvector (HNSW, cosine)
 ```
 
 ### Gateway controls
 
 | Concern | Control |
 |---|---|
-| Supply chain | No third-party runtime dependencies; JDK `HttpServer` + `HttpClient` only. Single jar runs on locked-down servers. |
-| Scale | One virtual thread per request; shared HTTP/2 client with connection pooling; semaphore caps concurrent streams and sheds excess with `503 Retry-After`. |
+| Stack | Spring Boot 4.1 and Spring AI 2.0 (current GA lines), PostgreSQL with pgvector. Embeddings (MiniLM) and reranking (MS MARCO cross-encoder) run locally on ONNX, so policy text and questions are not sent to a third party to build or search the index. A zero-dependency JDK edition is tagged [`v1-zero-dep`](../../tree/v1-zero-dep). |
+| Scale | Virtual threads per request; bounded Hikari pool; semaphore caps concurrent streams and sheds excess with `503 Retry-After`; reranker inference capped at one slot per core with a 2 s wait budget before degrading. |
+| Degradation | Vector store unavailable: lexical retrieval continues. Reranker unavailable: lexical relevance gate. No qualifying source: abstain. Each fallback is counted in `/api/health`. |
 | Abuse | Per-client token bucket (bounded LRU key space) with `429 Retry-After`; body size cap; strict UTF-8 and JSON (depth-limited) parsing. |
 | Data leakage | Emirates ID, IBAN, Luhn-valid card numbers, email and UAE mobile numbers are masked **before** text leaves the bank boundary. Count is reported to the UI, values never are. |
-| Grounding | Answers come only from the policy library and cite every statement. Retrieval filters by audience and effective date **before** ranking, applies a score and query-coverage gate, and abstains without a model call when no source qualifies. See [Step 1 lesson](docs/lessons/step-1-grounding.md). |
+| Grounding | Answers come only from the policy library and cite every statement. Retrieval filters by audience and effective date **before** ranking (in SQL for vectors, re-checked in Java), fuses lexical and semantic rankings, and admits only passages the cross-encoder scores as relevant. With no qualifying source it abstains without a model call. See the [Step 1](docs/lessons/step-1-grounding.md) and [Step 1b](docs/lessons/step-1b-hybrid-retrieval.md) lessons. |
 | Poisoned documents | Policy chunks with hidden markup, invisible characters or text addressed to the model are quarantined at load time and counted in `/api/health`. Source text is fenced and labelled as data in the prompt. |
 | Prompt injection | Control, zero-width and bidi characters stripped; NFKC normalisation; instruction-override phrasing rejected with `422`; hardened system prompt. Treated as a pre-filter, not a guarantee. |
 | Resilience | Hard total deadline (header timeout alone does not bound a stream); upstream closed as soon as the browser disconnects; SSE keep-alive for proxies; graceful drain on shutdown. |
@@ -37,28 +41,30 @@ Policy library (Markdown + front matter) ─► load-time quarantine of poisoned
 | Web security | CSP, `X-Frame-Options`, `nosniff`, `no-referrer`, COOP; CORS off unless an exact origin is configured; static files protected against traversal and symlink escape. |
 | Observability | Request id on every response (accepted from upstream if well-formed); structured logs with outcome and latency, never prompt content; counters at `/api/health`. |
 
-### Load test (mock provider, 256 MB heap)
+### Load test (v1 zero-dependency edition, mock provider, 256 MB heap)
 
 400 simultaneous streams against `MAX_CONCURRENT_STREAMS=200`: 200 completed, 200 rejected cleanly with `503`, 0 errors.
 
 ## Run locally
 
-Requirements: JDK 21, Maven 3.9, Node 22.
+Requirements: Docker Desktop. For development outside Docker: JDK 21, Maven 3.9 and Node 22.
 
 ```bash
-# 1. web app
-cd web
-npm ci
-npm run build
-
-# 2. gateway (mock provider, no key needed)
-cd ../server
-mvn -q package
-java -jar target/streaming-answer-ui.jar
+# Everything in containers (database + gateway with the built web app)
+docker compose up --build
 # open http://localhost:8080
 ```
 
-For frontend development with hot reload, run the gateway as above and `npm run dev` in `web/` (proxies `/api` to `:8080`).
+The first start downloads the embedding and reranker models (about 110 MB) into a named volume; later
+starts reuse them. Readiness: `http://localhost:8080/actuator/health/readiness`. Metrics: `/api/health`.
+
+Development loop (hot reload for the web app):
+
+```bash
+docker compose up -d db                 # PostgreSQL + pgvector only
+cd web && npm ci && npm run build       # or: npm run dev  (proxies /api to :8080)
+cd ../server && mvn spring-boot:run     # uses DB at localhost:5432
+```
 
 ### Real model
 
@@ -67,9 +73,8 @@ export LLM_PROVIDER=openai
 export LLM_API_KEY=...            # never commit this
 export LLM_MODEL=gpt-4o-mini
 # Azure OpenAI:
-# export LLM_ENDPOINT=https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2024-10-21
-# export LLM_AUTH_HEADER=api-key
-java -jar target/streaming-answer-ui.jar
+# OpenAI-compatible endpoints (Azure OpenAI, vLLM, LiteLLM): set LLM_BASE_URL
+docker compose up --build
 ```
 
 All settings are listed in [`.env.example`](.env.example) and validated at startup.
@@ -82,13 +87,6 @@ fictional bank. Point `POLICY_DIR` at your own library; files are validated and 
 
 Audience defaults to `customer`. To serve staff content, place the gateway behind an identity-aware proxy that
 sets `X-User-Audience` (and strips any client-supplied value), then set `TRUST_IDENTITY_HEADER=true`.
-
-### Docker
-
-```bash
-docker build -t streaming-answer-ui .
-docker run --rm -p 8080:8080 -e LLM_PROVIDER=mock streaming-answer-ui
-```
 
 ## API
 
@@ -116,8 +114,8 @@ Errors before streaming starts are JSON: `400 413 415 422 429 503`, each with `e
 ## Tests
 
 ```bash
-cd server && mvn verify      # JSON, masking, injection guards, rate limiter, provider parsing,
-                             # policy loading and quarantine, entitlement / versioning / relevance retrieval
+cd server && mvn verify      # unit tests, plus an integration test against real pgvector (Testcontainers),
+                             # local embeddings and the cross-encoder; skipped automatically without Docker
 cd web && npm test           # SSE parser, citation rendering
 ```
 
@@ -127,14 +125,18 @@ cd web && npm test           # SSE parser, citation rendering
 - Set `TRUST_PROXY=true` only behind a reverse proxy you control; the right-most `X-Forwarded-For` entry is used.
 - Fonts load from Google Fonts with system fallbacks; self-host them for air-gapped deployments and tighten the CSP.
 - Masking is pattern-based. Pair it with a DLP service for free-text names and addresses.
-- The policy index is built at startup. Restart (or roll the deployment) to publish new document versions;
-  effective dates mean you can publish ahead of a change and it switches on automatically.
+- The policy library is loaded at startup and synced to pgvector incrementally (only new passages are embedded,
+  retired ones are deleted). Restart or roll the deployment to publish; effective dates let you publish ahead
+  of a change and it switches on automatically.
+- Pin `RERANKER_MODEL_SHA256` (and mirror the model files internally) in production so a tampered upstream
+  artifact is refused. Point `RERANKER_MODEL_URI` / `RERANKER_TOKENIZER_URI` at the internal mirror.
 
 ## Build log
 
 | Step | Topic | Lesson |
 |---|---|---|
 | 1 | Grounding with entitlements, versioning and poisoned-document defense | [docs/lessons/step-1-grounding.md](docs/lessons/step-1-grounding.md) |
+| 1b | Spring AI 2.0, hybrid retrieval (BM25 + pgvector, RRF) and cross-encoder reranking | [docs/lessons/step-1b-hybrid-retrieval.md](docs/lessons/step-1b-hybrid-retrieval.md) |
 
 ## License
 
