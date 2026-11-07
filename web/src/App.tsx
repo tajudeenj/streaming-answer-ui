@@ -187,6 +187,9 @@ function Telemetry({ turn }: { turn: Turn }) {
         {turn.redactions > 0 && (
           <div><dt>Masked</dt><dd>{turn.redactions} {turn.redactions === 1 ? "detail" : "details"}</dd></div>
         )}
+        {turn.model && (
+          <div><dt>Answered by</dt><dd>{turn.model === "mock" ? "Offline extract (no AI model)" : turn.model}</dd></div>
+        )}
       </dl>
     </footer>
   );

@@ -13,6 +13,7 @@ export interface Turn {
   redactions: number;
   sources: SourceRef[];
   abstained: boolean;
+  model?: string;
   firstTokenMs?: number;
   totalMs?: number;
 }
@@ -73,7 +74,7 @@ export function useAnswerStream() {
 
     try {
       await streamAnswer(q, history, {
-        onMeta: (m) => patch(id, (t) => ({ ...t, requestId: m.requestId, redactions: m.redactions, sources: m.sources })),
+        onMeta: (m) => patch(id, (t) => ({ ...t, requestId: m.requestId, redactions: m.redactions, sources: m.sources, model: m.model })),
         onDelta: (text) => {
           if (!firstSeen) {
             firstSeen = true;
